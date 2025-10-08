@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ứng Dụng Danh Sách Công Việc</title>
+    <!-- Tải Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Thiết lập font Inter -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f7;
+        }
+        .todo-item-enter {
+            opacity: 0;
+            transform: translateY(-10px);
+        }
+        .todo-item-enter-active {
+            opacity: 1;
+            transform: translateY(0);
+            transition: opacity 300ms, transform 300ms;
+        }
+    </style>
+</head>
+<body class="min-h-screen flex items-start justify-center p-4 sm:p-8">
+
+    <div id="loading-spinner" class="absolute inset-0 flex items-center justify-center bg-gray-50 bg-opacity-75 z-50 hidden">
+        <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-indigo-500"></div>
+        <p class="ml-4 text-indigo-700 font-semibold">Đang tải...</p>
+    </div>
+
+    <!-- Container Chính -->
+    <div class="w-full max-w-xl bg-white shadow-2xl rounded-xl p-6 sm:p-8 space-y-6">
+        <header class="text-center space-y-1">
+            <h1 class="text-3xl font-extrabold text-gray-900 tracking-tight">Danh Sách Công Việc</h1>
+            <p id="user-info" class="text-xs text-gray-500 truncate">Đang tải thông tin người dùng...</p>
+        </header>
+
+        <!-- Form Thêm Công Việc Mới -->
+        <form id="todo-form" class="flex flex-col sm:flex-row gap-3">
+            <input type="text" id="new-todo-text" placeholder="Thêm công việc mới..." required
+                   class="flex-grow p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition duration-150">
+            <button type="submit"
+                    class="p-3 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition duration-150 ease-in-out shadow-md hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2">
+                Thêm
+            </button>
+        </form>
+
+        <!-- Danh Sách Công Việc -->
+        <div id="todo-list" class="space-y-3">
+            <!-- Công việc sẽ được chèn vào đây bởi JavaScript -->
+        </div>
+
+        <!-- Trạng thái trống -->
+        <div id="empty-state" class="text-center py-10 border border-dashed border-gray-300 rounded-lg bg-gray-50 hidden">
+            <svg class="mx-auto h-12 w-12 text-gray-400" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+            </svg>
+            <h3 class="mt-2 text-sm font-medium text-gray-900">Không có công việc nào</h3>
+            <p class="mt-1 text-sm text-gray-500">Hãy thêm công việc đầu tiên của bạn!</p>
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        // Import các module cần thiết từ Firebase SDK
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp, setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Bật chế độ Debug cho Firebase (Rất hữu ích để xem lỗi)
+        setLogLevel('Debug');
+
+        // Khai báo biến toàn cục từ môi trường Canvas
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        let userId = null;
+        let isAuthReady = false; // Cờ báo hiệu xác thực đã sẵn sàng
+
+        const loadingSpinner = document.getElementById('loading-spinner');
+        const userInfoElement = document.getElementById('user-info');
+        const todoListElement = document.getElementById('todo-list');
+        const emptyStateElement = document.getElementById('empty-state');
+
+        /**
+         * Hàm hiển thị/ẩn spinner tải
+         * @param {boolean} show - True để hiển thị, False để ẩn.
+         */
+        function toggleLoading(show) {
+            loadingSpinner.classList.toggle('hidden', !show);
+        }
+
+        /**
+         * Hàm thiết lập Firebase và xử lý xác thực
+         */
+        async function setupFirebase() {
+            if (Object.keys(firebaseConfig).length === 0) {
+                console.error("Firebase config is missing. Cannot initialize Firebase.");
+                userInfoElement.textContent = "Lỗi: Không tìm thấy cấu hình Firebase.";
+                return;
+            }
+
+            try {
+                toggleLoading(true);
+
+                app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                // Lắng nghe trạng thái xác thực
+                onAuthStateChanged(auth, async (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        isAuthReady = true;
+                        userInfoElement.innerHTML = `Mã người dùng (ID): <span class="font-mono text-indigo-600">${userId}</span>`;
+                        console.log("Authentication successful. User ID:", userId);
+                        // Bắt đầu lắng nghe công việc ngay sau khi auth sẵn sàng
+                        listenForTasks();
+                    } else {
+                        // Cố gắng đăng nhập
+                        try {
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(auth, initialAuthToken);
+                                console.log("Signed in with custom token.");
+                            } else {
+                                await signInAnonymously(auth);
+                                console.log("Signed in anonymously.");
+                            }
+                        } catch (error) {
+                            console.error("Authentication failed:", error);
+                            userInfoElement.textContent = "Lỗi xác thực: " + error.message;
+                        }
+                    }
+                    toggleLoading(false);
+                });
+
+            } catch (error) {
+                console.error("Error initializing Firebase:", error);
+                userInfoElement.textContent = "Lỗi khởi tạo Firebase: " + error.message;
+                toggleLoading(false);
+            }
+        }
+
+        /**
+         * Lấy tham chiếu đến Collection Tasks
+         */
+        function getTasksCollectionRef() {
+            if (!db || !userId) {
+                throw new Error("Firestore or User ID not available.");
+            }
+            // Sử dụng đường dẫn lưu trữ private
+            const path = `/artifacts/${appId}/users/${userId}/tasks`;
+            return collection(db, path);
+        }
+
+        /**
+         * Lắng nghe và hiển thị danh sách công việc theo thời gian thực
+         */
+        function listenForTasks() {
+            if (!isAuthReady || !db || !userId) {
+                console.log("Auth not ready or db/userId missing. Skipping task listener.");
+                return;
+            }
+
+            const tasksRef = getTasksCollectionRef();
+            // Tạo truy vấn: lấy tất cả task, sắp xếp theo thời gian tạo (mới nhất lên trên)
+            const q = query(tasksRef, orderBy('createdAt', 'desc'));
+
+            onSnapshot(q, (snapshot) => {
+                const tasks = [];
+                snapshot.forEach(doc => {
+                    // Đưa ID của document vào data
+                    tasks.push({ id: doc.id, ...doc.data() });
+                });
+                renderTasks(tasks);
+            }, (error) => {
+                console.error("Lỗi khi lắng nghe task:", error);
+                alert("Lỗi tải danh sách công việc: " + error.message);
+            });
+        }
+
+        /**
+         * Render danh sách công việc lên UI
+         * @param {Array} tasks - Mảng các đối tượng công việc.
+         */
+        function renderTasks(tasks) {
+            todoListElement.innerHTML = ''; // Xóa nội dung cũ
+            if (tasks.length === 0) {
+                emptyStateElement.classList.remove('hidden');
+            } else {
+                emptyStateElement.classList.add('hidden');
+                tasks.forEach(task => {
+                    todoListElement.appendChild(createTaskElement(task));
+                });
+            }
+        }
+
+        /**
+         * Tạo element HTML cho một công việc
+         * @param {Object} task - Đối tượng công việc.
+         * @returns {HTMLElement}
+         */
+        function createTaskElement(task) {
+            const item = document.createElement('div');
+            item.className = `flex items-center justify-between p-4 rounded-lg shadow-sm transition duration-200 ${
+                task.completed ? 'bg-green-100 border-l-4 border-green-500' : 'bg-white border border-gray-200 hover:shadow-md'
+            }`;
+
+            // Checkbox và Text
+            const leftSection = document.createElement('div');
+            leftSection.className = 'flex items-center flex-1 min-w-0';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.checked = task.completed;
+            checkbox.className = 'w-5 h-5 text-indigo-600 bg-gray-100 border-gray-300 rounded focus:ring-indigo-500 mr-4 cursor-pointer';
+            checkbox.onchange = () => toggleTaskCompleted(task.id, !task.completed);
+
+            const textSpan = document.createElement('span');
+            textSpan.className = `text-gray-800 break-words ${task.completed ? 'line-through text-gray-500' : 'font-medium'}`;
+            textSpan.textContent = task.text;
+
+            leftSection.appendChild(checkbox);
+            leftSection.appendChild(textSpan);
+
+            // Nút Xóa
+            const deleteButton = document.createElement('button');
+            deleteButton.className = 'ml-4 p-2 text-red-500 hover:text-red-700 rounded-full transition duration-150 focus:outline-none focus:ring-2 focus:ring-red-500';
+            deleteButton.innerHTML = `
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path>
+                </svg>
+            `;
+            deleteButton.onclick = () => deleteTask(task.id);
+
+            item.appendChild(leftSection);
+            item.appendChild(deleteButton);
+            return item;
+        }
+
+        /**
+         * Thêm công việc mới vào Firestore
+         * @param {Event} e - Sự kiện form submit.
+         */
+        document.getElementById('todo-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isAuthReady) return; // Đảm bảo auth đã sẵn sàng
+
+            const input = document.getElementById('new-todo-text');
+            const text = input.value.trim();
+
+            if (text === "") {
+                input.focus();
+                return;
+            }
+
+            toggleLoading(true);
+            try {
+                const docRef = await addDoc(getTasksCollectionRef(), {
+                    text: text,
+                    completed: false,
+                    createdAt: serverTimestamp() // Sử dụng timestamp của server
+                });
+                console.log("Công việc được thêm với ID: ", docRef.id);
+                input.value = ''; // Xóa input sau khi thêm
+            } catch (error) {
+                console.error("Lỗi khi thêm công việc: ", error);
+                alert("Không thể thêm công việc: " + error.message);
+            } finally {
+                toggleLoading(false);
+            }
+        });
+
+        /**
+         * Cập nhật trạng thái hoàn thành của công việc
+         * @param {string} id - ID của document.
+         * @param {boolean} completed - Trạng thái mới.
+         */
+        async function toggleTaskCompleted(id, completed) {
+            if (!isAuthReady) return;
+
+            // Không cần spinner vì onSnapshot sẽ xử lý cập nhật UI
+            try {
+                const taskDocRef = doc(getTasksCollectionRef(), id);
+                await updateDoc(taskDocRef, {
+                    completed: completed
+                });
+                console.log(`Công việc ${id} được cập nhật trạng thái: ${completed}`);
+            } catch (error) {
+                console.error("Lỗi khi cập nhật công việc: ", error);
+                alert("Không thể cập nhật trạng thái công việc: " + error.message);
+            }
+        }
+
+        /**
+         * Xóa công việc khỏi Firestore
+         * @param {string} id - ID của document.
+         */
+        async function deleteTask(id) {
+            if (!isAuthReady) return;
+
+            toggleLoading(true);
+            try {
+                const taskDocRef = doc(getTasksCollectionRef(), id);
+                await deleteDoc(taskDocRef);
+                console.log(`Công việc ${id} đã được xóa.`);
+            } catch (error) {
+                console.error("Lỗi khi xóa công việc: ", error);
+                alert("Không thể xóa công việc: " + error.message);
+            } finally {
+                toggleLoading(false);
+            }
+        }
+
+        // Bắt đầu ứng dụng khi cửa sổ tải xong
+        window.onload = setupFirebase;
+    </script>
+</body>
+</html>
